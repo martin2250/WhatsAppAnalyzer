@@ -12,6 +12,7 @@ parser = argparse.ArgumentParser(description='analyze exported whatsapp chat')
 parser.add_argument('files', nargs = '+', type=Path, help='txt files')
 parser.add_argument('--daily', action='store_true')
 parser.add_argument('--hourly', action='store_true')
+parser.add_argument('--reply_time', action='store_true')
 args = parser.parse_args()
 
 # ---------------------------------------------------------------------------- #
@@ -94,7 +95,11 @@ class Statistic:
 	message_length: int = 0
 	word_count: int = 0
 	emoji_count: int = 0
+
+@dataclass
+class GeneralStatistic(Statistic):
 	emoji_stat: dict = field(default_factory=dict)
+	reply_times: list = field(default_factory=list)
 
 StatisticIndex = collections.namedtuple('StatisticIndex', ['sender_id', 'chat_id'])
 
@@ -105,31 +110,41 @@ statistics_by_hour = {}
 statistics = {}
 
 for chat_id, chat in enumerate(chats):
+	last_sender_id = chat.messages[0].sender_id
+	last_message_time = None
+
 	for message in chat.messages:
 		index = StatisticIndex(sender_id = message.sender_id, chat_id = chat_id)
 		date = message.time.date()
 		hour = message.time.hour
 
+		# create missing statistics containers
 		if not index in statistics:
-			statistics[index] = Statistic()
+			statistics[index] = GeneralStatistic()
 
 		if not index in statistics_by_date:
 			statistics_by_date[index] = {}
-
-		if not index in statistics_by_hour:
-			statistics_by_hour[index] = {}
-
 		if not date in statistics_by_date[index]:
 			statistics_by_date[index][date] = Statistic()
 
+		if not index in statistics_by_hour:
+			statistics_by_hour[index] = {}
 		if not hour in statistics_by_hour[index]:
 			statistics_by_hour[index][hour] = Statistic()
 
+		# calculate time since last message from different sender
+		if message.sender_id != last_sender_id:
+			statistics[index].reply_times.append(message.time - last_message_time)
+
+		last_sender_id, last_message_time = message.sender_id, message.time
+
+		# track statistics
 		for stat in [statistics_by_date[index][date], statistics_by_hour[index][hour], statistics[index]]:
 			stat.message_count += 1
 			stat.message_length += len(message.text)
 			stat.word_count += len(message.text.split())
 
+		# track emoji stats
 		for find_item in emoji.emoji_lis(message.text):
 			emoji_type = find_item['emoji']
 
@@ -208,4 +223,33 @@ for statistics_by_index in statistics_to_plot:
 			# ax.bar(dates, emoji_counts, label='emoji count')
 
 			ax.legend()
+
+# ---------------------------------------------------------------------------- #
+# plot reply times
+if args.reply_time:
+	for chat_id, chat in enumerate(chats):
+		fig, axes = plt.subplots(nrows = len(chat.sender_ids), sharex=True)
+
+		reply_time_max = 0
+		for sender_id in chat.sender_ids:
+			index_stat = StatisticIndex(sender_id = sender_id, chat_id = chat_id)
+			stats = statistics[index_stat]
+			reply_times_minutes = [td.total_seconds()/60 for td in stats.reply_times]
+			reply_times_minutes.append(reply_time_max)
+			reply_time_max = np.max(reply_times_minutes)
+
+		bins = np.logspace(0, np.log10(reply_time_max), 30)
+
+		for sender_id, ax in zip(chat.sender_ids, axes):
+			ax.set_title(senders_by_id[sender_id].name)
+
+			index_stat = StatisticIndex(sender_id = sender_id, chat_id = chat_id)
+			stats = statistics[index_stat]
+			reply_times_minutes = [td.total_seconds()/60 for td in stats.reply_times]
+
+			ax.hist(reply_times_minutes, bins=bins, log=True)
+			ax.set_xscale("log", nonposx='clip')
+			ax.set_xlabel('reply time in minutes')
+			ax.set_xlim(1, np.max(reply_times_minutes))
+
 plt.show()
